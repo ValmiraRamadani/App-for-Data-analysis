@@ -9,7 +9,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select
 from bs4 import BeautifulSoup
 import os
-from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 scraped_data = []
 scraped_records = set()
@@ -48,14 +48,12 @@ def signal_handler(sig, frame):
 
 signal.signal(signal.SIGINT, signal_handler)
 
+url = "https://www.mse.mk/en/stats/symbolhistory/alk"
 options = webdriver.ChromeOptions()
 options.add_argument("--headless")
 options.add_argument("--disable-gpu")
-options.add_argument("--disable-software-rasterizer")
-options.add_argument("--no-sandbox")
-
 driver = webdriver.Chrome(options=options)
-driver.get("https://www.mse.mk/en/stats/symbolhistory/alk")
+driver.get(url)
 wait = WebDriverWait(driver, 10)
 
 dropdown = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="Code"]')))
@@ -65,14 +63,25 @@ print(f"Found {len(valid_firms)} valid firms.")
 
 load_from_csv()
 
+def swap_commas_and_periods(data):
+    if isinstance(data, str):
+        if any(char.isdigit() for char in data):
+            return data.replace(",", ".").replace(".", ",")
+    return data
+
 def scrape_firm(firm, max_retries=3, retry_delay=10):
     global scraped_records
     attempt = 0
+    today = datetime.today().strftime("%m/%d/%Y")
+
     while attempt < max_retries:
         try:
             dropdown = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="Code"]')))
             select = Select(dropdown)
             select.select_by_visible_text(firm)
+
+            latest_to_date = None
+            data_found = False
 
             for i in range(14, 24):
                 from_date = f"10/9/20{i}"
@@ -82,35 +91,83 @@ def scrape_firm(firm, max_retries=3, retry_delay=10):
                     print(f"Skipping already scraped data for {firm} from {from_date} to {to_date}")
                     continue
 
-                od_date = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="FromDate"]')))
-                do_date = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="ToDate"]')))
-                od_date.clear()
-                od_date.send_keys(from_date)
-                do_date.clear()
-                do_date.send_keys(to_date)
+                if latest_to_date is None or to_date > latest_to_date:
+                    latest_to_date = to_date
 
-                submit_button = wait.until(
-                    EC.element_to_be_clickable((By.XPATH, '//*[@id="report-filter-container"]/ul/li[4]/input'))
-                )
-                submit_button.click()
+                if latest_to_date < today:
+                    od_date = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="FromDate"]')))
+                    do_date = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="ToDate"]')))
 
-                wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="resultsTable"]')))
-                result_page = driver.page_source
-                result_soup = BeautifulSoup(result_page, "html.parser")
-                elements = result_soup.select("#resultsTable > tbody > tr")
-                print(f"Found {len(elements)} rows for firm {firm} from {from_date} to {to_date}")
+                    od_date.clear()
+                    od_date.send_keys(from_date)
+                    do_date.clear()
+                    do_date.send_keys(to_date)
 
-                for row in elements:
-                    columns = row.find_all("td")
-                    row_data = [cell.text.strip() for cell in columns]
-                    scraped_data.append({
-                        "firm": firm,
-                        "from_date": from_date,
-                        "to_date": to_date,
-                        "data": row_data,
-                    })
+                    submit_button = wait.until(
+                        EC.element_to_be_clickable((By.XPATH, '//*[@id="report-filter-container"]/ul/li[4]/input'))
+                    )
+                    submit_button.click()
 
-                scraped_records.add((firm, from_date, to_date))
+                    wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="resultsTable"]')))
+                    result_page = driver.page_source
+                    result_soup = BeautifulSoup(result_page, "html.parser")
+
+                    elements = result_soup.select("#resultsTable > tbody > tr")
+                    print(f"Found {len(elements)} rows for firm {firm} from {from_date} to {to_date}")
+
+                    for row in elements:
+                        columns = row.find_all("td")
+                        row_data = [swap_commas_and_periods(cell.text.strip()) for cell in columns]
+
+                        scraped_data.append({
+                            "firm": firm,
+                            "from_date": from_date,
+                            "to_date": to_date,
+                            "data": row_data,
+                        })
+
+                    scraped_records.add((firm, from_date, to_date))
+                    data_found = True
+
+            if not data_found:
+                current_year = datetime.today().year
+                for i in range(10):  # Get data for the last 10 years
+                    from_date = f"10/9/{current_year - i}"
+                    to_date = f"8/9/{current_year - i + 1}"
+
+                    if (firm, from_date, to_date) not in scraped_records:
+                        od_date = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="FromDate"]')))
+                        do_date = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="ToDate"]')))
+
+                        od_date.clear()
+                        od_date.send_keys(from_date)
+                        do_date.clear()
+                        do_date.send_keys(to_date)
+
+                        submit_button = wait.until(
+                            EC.element_to_be_clickable((By.XPATH, '//*[@id="report-filter-container"]/ul/li[4]/input'))
+                        )
+                        submit_button.click()
+
+                        wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="resultsTable"]')))
+                        result_page = driver.page_source
+                        result_soup = BeautifulSoup(result_page, "html.parser")
+
+                        elements = result_soup.select("#resultsTable > tbody > tr")
+                        print(f"Found {len(elements)} rows for firm {firm} from {from_date} to {to_date}")
+
+                        for row in elements:
+                            columns = row.find_all("td")
+                            row_data = [swap_commas_and_periods(cell.text.strip()) for cell in columns]
+
+                            scraped_data.append({
+                                "firm": firm,
+                                "from_date": from_date,
+                                "to_date": to_date,
+                                "data": row_data,
+                            })
+
+                        scraped_records.add((firm, from_date, to_date))
 
             break
 
@@ -124,9 +181,8 @@ def scrape_firm(firm, max_retries=3, retry_delay=10):
                 print(f"Failed to scrape firm '{firm}' after {max_retries} attempts.")
                 continue
 
-with ThreadPoolExecutor() as executor:
-    executor.map(scrape_firm, valid_firms)
+for firm in valid_firms:
+    scrape_firm(firm)
 
 save_to_csv()
-
 driver.quit()
